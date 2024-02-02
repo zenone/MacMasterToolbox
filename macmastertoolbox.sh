@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Mac Update and Maintenance Script
+
 # Colors and Styles
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -8,128 +10,181 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
-# Exit immediately if a command exits with a non-zero status
-# set -e
+# Function Definitions
+command_exists() {
+    type "$1" &> /dev/null
+}
+
+log_section() {
+    echo -e "\n${YELLOW}${BOLD}--- $1 ---${NC}"
+}
+
+log_info() {
+    echo -e "${YELLOW}[*] $1${NC}"
+}
+
+log_success() {
+    echo -e "${GREEN}[*] $1${NC}"
+}
+
+log_error() {
+    echo -e "${RED}$1${NC}"
+}
+
+perform_backup() {
+    log_section "Backup Process"
+    log_info "Creating a backup..."
+    # rsync -avh --exclude '.Trash' ~/Documents/ ~/Backups/DocumentsBackup_$(date +"%Y%m%d")/
+}
+
+check_disk_health() {
+    log_section "Disk Space and Health"
+    log_info "Checking available disk space..."
+    df -H
+    log_info "Checking disk health..."
+    for disk in $(diskutil list | grep '^/' | awk '{print $1}'); do
+        log_info "Checking $disk..."
+        if ! sudo diskutil verifyDisk $disk; then
+            log_error "Error verifying $disk. This disk might not support verification."
+        fi
+        for volume in $(diskutil list $disk | grep 'Apple_APFS' | awk '{print $NF}'); do
+            log_info "Checking volume $volume..."
+            if ! sudo diskutil verifyVolume $volume; then
+                log_error "Error verifying volume $volume. This volume might not support verification or might be a special volume."
+            fi
+        done
+    done
+}
+
+system_checks() {
+    log_section "System Checks"
+    log_info "Checking System Integrity Protection status..."
+    csrutil status
+    log_info "Testing network connectivity..."
+    if ! ping -c 4 google.com; then
+        log_error "Network issue detected. Exiting."
+        exit 1
+    fi
+}
+
+update_software() {
+    log_section "Software Updates"
+    log_info "Updating macOS software..."
+    sudo softwareupdate -i -a
+}
+
+update_homebrew() {
+    if command_exists brew; then
+        log_info "Updating Homebrew packages..."
+        brew update
+        brew upgrade
+        brew cleanup -s
+        brew upgrade --cask
+        log_info "Running Homebrew diagnostics..."
+        if ! brew doctor; then
+            log_error "Homebrew diagnostics reported issues."
+        fi
+        brew missing
+    else
+        log_error "Homebrew not installed, skipping Homebrew updates."
+    fi
+}
+
+update_mas() {
+    if command_exists mas; then
+        log_info "Updating Mac App Store apps..."
+        mas outdated
+        mas upgrade
+    else
+        log_error "Mac App Store CLI not installed, skipping App Store updates."
+    fi
+}
+
+update_ruby_gems() {
+    if command_exists gem; then
+        log_info "Updating Ruby Gems..."
+        sudo gem update
+    else
+        log_error "Ruby Gems not installed, skipping Ruby updates."
+    fi
+}
+
+update_npm_packages() {
+    if command_exists npm; then
+        log_info "Updating global npm packages..."
+        npm update npm -g
+        npm update -g
+    else
+        log_error "npm not installed, skipping npm package updates."
+    fi
+}
+
+update_python_packages() {
+    if command_exists pip; then
+        log_info "Updating Python packages..."
+        pip list --outdated --format=freeze | grep -v '^\-e' | cut -d = -f 1 | xargs -n 1 pip install --user -U
+    else
+        log_error "pip not installed, skipping Python package updates."
+    fi
+}
+
+perform_maintenance_tasks() {
+    log_section "Maintenance Tasks"
+    log_info "Flushing DNS cache..."
+    sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+    log_info "Cleaning up unused packages..."
+    if command_exists brew; then
+        brew cleanup
+    fi
+    if command_exists npm; then
+        npm cache clean --force
+    fi
+    log_info "Cleaning up old system logs..."
+    sudo rm -rf /var/log/*.gz
+}
+
+optimize_storage() {
+    log_section "Time Machine and Storage"
+    log_info "Checking the status of Time Machine backups..."
+    tmutil latestbackup
+    log_info "Optimizing storage..."
+    sudo tmutil thinLocalSnapshots / 1000000000 1
+}
+
+empty_trash() {
+    log_section "Trash Cleanup"
+    log_info "Emptying trash..."
+    sudo rm -rfv /Volumes/*/.Trashes/*; sudo rm -rfv ~/.Trash/*; sudo rm -rfv /private/var/log/asl/*.asl
+}
+
+notify_completion() {
+    log_success "System update complete!"
+    echo -e "${BLUE}Update script completed at $(date)${NC}"
+    osascript -e 'display notification "System update complete!" with title "Update Script"'
+}
+
+show_reminders() {
+    echo -e "\n${RED}${BOLD}[!] Don't forget to manually check for deprecated packages and monitor system performance!${NC}"
+    echo -e "${RED}[!] Consider rebooting your system if major updates were installed.${NC}"
+}
 
 # Redirect output to a log file with timestamp
 exec > >(tee -a ~/update_script_log.txt)
 exec 2>&1
 echo -e "${BLUE}${BOLD}Update script started at $(date)${NC}"
 
-# Function to check command availability
-command_exists() {
-    type "$1" &> /dev/null
-}
-
-# Backup command
-echo -e "\n${YELLOW}${BOLD}--- Backup Process ---${NC}"
-echo -e "${YELLOW}[*] Creating a backup...${NC}"
-# rsync -avh --exclude '.Trash' ~/Documents/ ~/Backups/DocumentsBackup_$(date +"%Y%m%d")/
-
-# Disk Space and Health
-echo -e "\n${YELLOW}${BOLD}--- Disk Space and Health ---${NC}"
-echo -e "${YELLOW}[*] Checking available disk space...${NC}"
-df -H
-
-# Dynamically checking disk health
-echo -e "${YELLOW}[*] Checking disk health...${NC}"
-for disk in $(diskutil list | grep '^/' | awk '{print $1}'); do
-    echo -e "${YELLOW}Checking $disk...${NC}"
-    sudo diskutil verifyDisk $disk
-
-    for volume in $(diskutil list $disk | grep 'Apple_APFS' | awk '{print $NF}'); do
-        echo -e "${YELLOW}Checking volume $volume...${NC}"
-        sudo diskutil verifyVolume $volume
-    done
-done
-
-# System Checks
-echo -e "\n${YELLOW}${BOLD}--- System Checks ---${NC}"
-echo -e "${YELLOW}[*] Checking System Integrity Protection status...${NC}"
-csrutil status
-echo -e "${YELLOW}[*] Testing network connectivity...${NC}"
-ping -c 4 google.com || { echo -e "${RED}Network issue detected. Exiting.${NC}"; exit 1; }
-
-# Software Updates
-echo -e "\n${YELLOW}${BOLD}--- Software Updates ---${NC}"
-echo -e "${YELLOW}[*] Updating macOS software...${NC}"
-sudo softwareupdate -i -a
-
-# Homebrew
-if command_exists brew; then
-    echo -e "${YELLOW}[*] Updating Homebrew packages...${NC}"
-    brew update
-    brew upgrade
-    brew cleanup -s
-    brew upgrade --cask
-    echo -e "${YELLOW}[*] Running Homebrew diagnostics...${NC}"
-    brew doctor
-    brew missing
-else
-    echo -e "${RED}Homebrew not installed, skipping Homebrew updates.${NC}"
-fi
-
-# Mac App Store
-if command_exists mas; then
-    echo -e "${YELLOW}[*] Updating Mac App Store apps...${NC}"
-    mas outdated
-    mas upgrade
-else
-    echo -e "${RED}Mac App Store CLI not installed, skipping App Store updates.${NC}"
-fi
-
-# Ruby Gems
-if command_exists gem; then
-    echo -e "${YELLOW}[*] Updating Ruby Gems...${NC}"
-    sudo gem update
-else
-    echo -e "${RED}Ruby Gems not installed, skipping Ruby updates.${NC}"
-fi
-
-# NPM Packages
-if command_exists npm; then
-    echo -e "${YELLOW}[*] Updating global npm packages...${NC}"
-    npm update npm -g
-    npm update -g
-else
-    echo -e "${RED}npm not installed, skipping npm package updates.${NC}"
-fi
-
-# Python Packages
-if command_exists pip; then
-    echo -e "${YELLOW}[*] Updating Python packages...${NC}"
-    pip list --outdated --format=freeze | grep -v '^\-e' | cut -d = -f 1 | xargs -n 1 pip install --user -U
-else
-    echo -e "${RED}pip not installed, skipping Python package updates.${NC}"
-fi
-
-# Maintenance Tasks
-echo -e "\n${YELLOW}${BOLD}--- Maintenance Tasks ---${NC}"
-echo -e "${YELLOW}[*] Flushing DNS cache...${NC}"
-sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
-echo -e "${YELLOW}[*] Cleaning up unused packages...${NC}"
-brew cleanup
-npm cache clean --force
-echo -e "${YELLOW}[*] Cleaning up old system logs...${NC}"
-sudo rm -rf /var/log/*.gz
-
-# Time Machine and Storage
-echo -e "\n${YELLOW}${BOLD}--- Time Machine and Storage ---${NC}"
-echo -e "${YELLOW}[*] Checking the status of Time Machine backups...${NC}"
-tmutil latestbackup
-echo -e "${YELLOW}[*] Optimizing storage...${NC}"
-sudo tmutil thinLocalSnapshots / 1000000000 1
-
-# Trash Cleanup
-echo -e "\n${YELLOW}${BOLD}--- Trash Cleanup ---${NC}"
-echo -e "${YELLOW}[*] Emptying trash...${NC}"
-sudo rm -rfv /Volumes/*/.Trashes/*; sudo rm -rfv ~/.Trash/*; sudo rm -rfv /private/var/log/asl/*.asl
-
-# Completion Notification
-echo -e "\n${GREEN}${BOLD}[*] System update complete!${NC}"
-echo -e "${BLUE}Update script completed at $(date)${NC}"
-osascript -e 'display notification "System update complete!" with title "Update Script"'
-
-# Reminder
-echo -e "\n${RED}${BOLD}[!] Don't forget to manually check for deprecated packages and monitor system performance!${NC}"
-echo -e "${RED}[!] Consider rebooting your system if major updates were installed.${NC}"
+# Perform all tasks
+perform_backup
+check_disk_health
+system_checks
+update_software
+update_homebrew
+update_mas
+update_ruby_gems
+update_npm_packages
+update_python_packages
+perform_maintenance_tasks
+optimize_storage
+empty_trash
+notify_completion
+show_reminders
