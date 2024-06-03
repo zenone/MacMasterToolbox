@@ -130,6 +130,7 @@ handle_npm_errors() {
     if echo "$error" | grep -q "EACCES"; then
         log_warning "Fixing npm permissions..."
         sudo chown -R $(whoami) /opt/homebrew/lib/node_modules/npm /opt/homebrew/lib/node_modules/.npm-*
+        sudo chown -R $(whoami) ~/.npm
     elif echo "$error" | grep -q "E404"; then
         log_warning "Removing invalid npm package..."
         local invalid_package=$(echo "$error" | grep -oP "(?<=404  ').*(?= is not in this registry)")
@@ -159,14 +160,16 @@ handle_ruby_errors() {
             log_error "OpenSSL installation or linking failed."
             exit 1
         fi
-        # Rebuild Ruby with OpenSSL
-        if ! rbenv install 3.1.2 -s; then
-            log_error "Failed to rebuild Ruby with OpenSSL."
-            exit 1
-        fi
     elif echo "$error" | grep -q "Gem::FilePermissionError"; then
         log_warning "Fixing Ruby Gem permissions error..."
         sudo chown -R $(whoami) /Library/Ruby/Gems/2.6.0
+    elif echo "$error" | grep -q "There are no versions of"; then
+        log_warning "Handling incompatible Ruby gem issue..."
+        local gem_name=$(echo "$error" | grep -oP "(?<=Error installing ).*(?= there are no versions of)")
+        log_info "Uninstalling incompatible gem: $gem_name..."
+        gem uninstall "$gem_name"
+        log_info "Installing compatible version of $gem_name..."
+        gem install "$gem_name" -v "$(gem search "^$gem_name$" --remote | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
     else
         log_warning "Unknown Ruby error encountered: $error"
     fi
@@ -178,6 +181,7 @@ handle_python_errors() {
     local error="$1"
     if echo "$error" | grep -q "externally-managed-environment"; then
         log_warning "Handling externally managed environment error..."
+        # Use virtual environment for Python package installation
         python3 -m venv /tmp/python-venv
         source /tmp/python-venv/bin/activate
         log_info "Virtual environment created and activated."
@@ -192,31 +196,25 @@ handle_python_errors() {
     fi
 }
 
-# Function to clear system caches
+# Function to clear system and user caches
 clear_caches() {
     log_section "Clearing System Caches"
     log_info "Clearing system and user caches..."
-    
-    # Clear user caches
-    sudo find ~/Library/Caches/ -mindepth 1 -exec rm -rf {} \;
-
-    # Clear system caches if SIP is disabled
-    if csrutil status | grep -q 'disabled'; then
-        sudo find /Library/Caches/ -mindepth 1 -exec rm -rf {} \;
-        sudo find /System/Library/Caches/ -mindepth 1 -exec rm -rf {} \;
-    else
+    if csrutil status | grep -q "enabled"; then
         log_warning "System Integrity Protection (SIP) is enabled. Skipping system caches."
+    else
+        sudo find /Library/Caches -type f -delete 2>/dev/null || log_warning "Some system caches could not be cleared."
     fi
-
+    find ~/Library/Caches -type f -delete 2>/dev/null || log_warning "Some user caches could not be cleared."
     log_success "System and user caches cleared successfully."
 }
 
-# Function to clear logs
+# Function to clear system and user logs
 clear_logs() {
     log_section "Clearing System Logs"
     log_info "Clearing system and user logs..."
-    sudo find /var/log/ -mindepth 1 -exec rm -rf {} \;
-    sudo find ~/Library/Logs/ -mindepth 1 -exec rm -rf {} \;
+    sudo find /var/log -type f -delete 2>/dev/null || log_warning "Some system logs could not be cleared."
+    find ~/Library/Logs -type f -delete 2>/dev/null || log_warning "Some user logs could not be cleared."
     log_success "System and user logs cleared successfully."
 }
 
@@ -239,17 +237,6 @@ display_system_info() {
     log_info "Displaying system information..."
     system_profiler SPSoftwareDataType SPHardwareDataType
     log_success "System information displayed successfully."
-}
-
-# Function to uninstall applications
-uninstall_applications() {
-    log_section "Uninstalling Applications"
-    local app_name="$1"
-    log_info "Uninstalling $app_name..."
-    sudo rm -rf /Applications/"$app_name".app
-    sudo rm -rf ~/Library/Application\ Support/"$app_name"
-    sudo rm -rf ~/Library/Preferences/com."$app_name".plist
-    log_success "$app_name uninstalled successfully."
 }
 
 # System updates
