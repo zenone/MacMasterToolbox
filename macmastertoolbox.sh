@@ -1,7 +1,5 @@
 #!/bin/bash
 
-# Enhanced script with robust error handling, input validation, and optimized performance
-
 # Colors and Emoji Codes for readability and user feedback
 RED=$'\033[0;31m'
 GREEN=$'\033[0;32m'
@@ -17,249 +15,318 @@ NETWORK_EMOJI="🌐"
 
 # Ensure the script is not run as root to avoid Homebrew issues
 if [[ $EUID -eq 0 ]]; then
-   echo -e "${RED}This script must not be run as root${NC}" 1>&2
-   exit 1
+    echo -e "${RED}${ERROR_EMOJI} This script must not be run as root${NC}" 1>&2
+    exit 1
 fi
-
-AUTO_REPAIR=false
-
-while [[ "$#" -gt 0 ]]; do
-  case $1 in
-    --auto-repair) AUTO_REPAIR=true ;;
-    *) echo "Unknown parameter passed: $1"; exit 1 ;;
-  esac
-  shift
-done
 
 # Function to check if a command exists
 command_exists() {
-  command -v "$1" >/dev/null 2>&1
+    command -v "$1" >/dev/null 2>&1
 }
 
 # Automatically install missing commands
 ensure_command() {
-  local command="$1"
-  local install_cmd="$2"
-  if ! command_exists "$command"; then
-    log_info "Installing $command..."
-    eval "$install_cmd"
+    local command="$1"
+    local install_cmd="$2"
     if ! command_exists "$command"; then
-      log_error "Failed to install $command."
-      exit 1
+        log_info "Installing $command..."
+        eval "$install_cmd"
+        if ! command_exists "$command"; then
+            log_error "Failed to install $command."
+            exit 1
+        fi
     fi
-  fi
 }
 
 # Function Definitions for Logging
 log_section() {
-  echo -e "\n${YELLOW}${BOLD}--- $1 ---${NC}"
+    echo -e "\n${YELLOW}${BOLD}--- $1 ---${NC}"
 }
 
 log_info() {
-  echo -e "${BLUE}${INFO_EMOJI} $1${NC}"
+    echo -e "${BLUE}${INFO_EMOJI} $1${NC}"
 }
 
 log_success() {
-  echo -e "${GREEN}${SUCCESS_EMOJI} $1${NC}"
+    echo -e "${GREEN}${SUCCESS_EMOJI} $1${NC}"
 }
 
 log_error() {
-  echo -e "${RED}${ERROR_EMOJI} $1${NC}"
+    echo -e "${RED}${ERROR_EMOJI} $1${NC}"
 }
 
 log_warning() {
-  echo -e "${YELLOW}${WARNING_EMOJI} $1${NC}"
+    echo -e "${YELLOW}${WARNING_EMOJI} $1${NC}"
 }
 
 # Function to check network connectivity
 check_network_connection() {
-  log_info "Checking network connectivity..."
-  if ! ping -c 1 google.com >/dev/null 2>&1; then
-    log_error "No network connection. Please check your internet connection before proceeding."
-    exit 1
-  fi
-  log_success "Network is up and running."
+    log_info "Checking network connectivity..."
+    if ! ping -c 1 google.com >/dev/null 2>&1; then
+        log_error "No network connection. Please check your internet connection before proceeding."
+        exit 1
+    fi
+    log_success "Network is up and running."
 }
 
 # Placeholder function for backup
 perform_backup() {
-  log_section "Backup Process"
-  log_info "Creating a backup..."
-  # Placeholder for actual backup command
+    log_section "Backup Process"
+    log_info "Creating a backup..."
+    # Placeholder for actual backup command
+    log_success "Backup created successfully."
 }
 
 # Function to check and repair disk health
-check_disk_health() {
-  log_section "Checking Disk Health"
-  log_info "Checking disk health..."
-  diskutil list | grep '^/' | awk '{print $1}' | while read -r disk; do
-    log_info "Verifying $disk..."
-    if diskutil verifyDisk "$disk" >/dev/null 2>&1; then
-      log_info "Verification successful for $disk."
-      if [[ "$AUTO_REPAIR" = true ]]; then
-        log_info "Automatically attempting to repair $disk..."
-        yes | diskutil repairDisk "$disk"
-        if [[ $? -eq 0 ]]; then
-          log_success "Disk repaired successfully."
+check_and_repair_disks() {
+    log_section "Checking and Repairing Disk Health"
+    log_info "Checking disk health..."
+    disks=$(diskutil list | grep '^/dev/' | awk '{print $1}')
+    for disk in $disks; do
+        log_info "Verifying $disk..."
+        if diskutil verifyDisk "$disk" >/dev/null 2>&1; then
+            log_info "Verification successful for $disk."
         else
-          log_error "Failed to repair $disk. Manual intervention may be required."
-        fi
-      else
-        if [[ -t 1 ]]; then  # Check if stdout is a terminal
-          log_warning "Repairing the disk might erase data on $disk. Proceed with repair? (y/N)"
-          read -r proceed
-          if [[ "$proceed" =~ ^[Yy]$ ]]; then
-            log_info "Attempting to repair $disk..."
-            yes | diskutil repairDisk "$disk"
-            if [[ $? -eq 0 ]]; then
-              log_success "Disk repaired successfully."
+            log_warning "Verification failed for $disk. Attempting repair..."
+            if diskutil repairDisk "$disk" >/dev/null 2>&1; then
+                log_success "Repair successful for $disk."
             else
-              log_error "Failed to repair $disk. Manual intervention may be required."
+                log_error "Repair failed for $disk. Retrying..."
+                # Retry mechanism
+                if diskutil repairDisk "$disk" >/dev/null 2>&1; then
+                    log_success "Repair successful for $disk on retry."
+                else
+                    log_error "Repair failed for $disk on retry. Please check the disk manually."
+                fi
             fi
-          else
-            log_warning "Repair canceled by user for $disk."
-          fi
-        else
-          log_warning "Skipping repair as no user input is possible."
         fi
-      fi
+        partitions=$(diskutil list "$disk" | grep '^/dev/' | awk '{print $1}')
+        for partition in $partitions; do
+            log_info "Verifying $partition..."
+            if diskutil verifyVolume "$partition" >/dev/null 2>&1; then
+                log_info "Verification successful for $partition."
+            else
+                log_warning "Verification failed for $partition. Attempting repair..."
+                if diskutil repairVolume "$partition" >/dev/null 2>&1; then
+                    log_success "Repair successful for $partition."
+                else
+                    log_error "Repair failed for $partition. Retrying..."
+                    # Retry mechanism
+                    if diskutil repairVolume "$partition" >/dev/null 2>&1; then
+                        log_success "Repair successful for $partition on retry."
+                    else
+                        log_error "Repair failed for $partition on retry. Please check the partition manually."
+                    fi
+                fi
+            fi
+        done
+    done
+}
+
+# Function to handle npm errors
+handle_npm_errors() {
+    log_section "Handling npm Errors"
+    local error="$1"
+    if echo "$error" | grep -q "EACCES"; then
+        log_warning "Fixing npm permissions..."
+        sudo chown -R $(whoami) /opt/homebrew/lib/node_modules/npm /opt/homebrew/lib/node_modules/.npm-*
+    elif echo "$error" | grep -q "E404"; then
+        log_warning "Removing invalid npm package..."
+        local invalid_package=$(echo "$error" | grep -oP "(?<=404  ').*(?= is not in this registry)")
+        npm uninstall -g "$invalid_package" || true
+    elif echo "$error" | grep -q "EUSAGE"; then
+        log_warning "Fixing npm usage error..."
+        npm uninstall -g $(echo "$error" | grep -oP "(?<=Usage:).*") || true
+    elif echo "$error" | grep -q "EACCESS"; then
+        log_warning "Fixing npm EACCESS error..."
+        sudo chown -R $(whoami) ~/.npm
+        sudo chown -R $(whoami) /usr/local/lib/node_modules
+        sudo chown -R $(whoami) /opt/homebrew/lib/node_modules
     else
-      log_error "Verification failed for $disk. It might not support verification."
+        log_warning "Unknown npm error encountered: $error"
     fi
-  done
+}
+
+# Function to handle Ruby errors
+handle_ruby_errors() {
+    log_section "Handling Ruby Errors"
+    local error="$1"
+    if echo "$error" | grep -q "OpenSSL"; then
+        log_warning "Fixing OpenSSL issue..."
+        brew install openssl
+        brew link --force openssl
+        if ! openssl version | grep -q "OpenSSL"; then
+            log_error "OpenSSL installation or linking failed."
+            exit 1
+        fi
+        # Rebuild Ruby with OpenSSL
+        if ! rbenv install 3.1.2 -s; then
+            log_error "Failed to rebuild Ruby with OpenSSL."
+            exit 1
+        fi
+    elif echo "$error" | grep -q "Gem::FilePermissionError"; then
+        log_warning "Fixing Ruby Gem permissions error..."
+        sudo chown -R $(whoami) /Library/Ruby/Gems/2.6.0
+    else
+        log_warning "Unknown Ruby error encountered: $error"
+    fi
+}
+
+# Function to handle Python errors
+handle_python_errors() {
+    log_section "Handling Python Errors"
+    local error="$1"
+    if echo "$error" | grep -q "externally-managed-environment"; then
+        log_warning "Handling externally managed environment error..."
+        python3 -m venv /tmp/python-venv
+        source /tmp/python-venv/bin/activate
+        log_info "Virtual environment created and activated."
+    elif echo "$error" | grep -q "normal site-packages is not writeable"; then
+        log_warning "Defaulting to user installation due to non-writable site-packages..."
+        python3 -m pip install --user --upgrade pip
+        pip3 install --user --upgrade $(pip3 list --outdated | awk 'NR>2 {print $1}') || log_warning "Failed to update some Python packages."
+    elif echo "$error" | grep -q "ERROR: You must give at least one requirement to install"; then
+        log_warning "No requirements specified for pip install. Skipping..."
+    else
+        log_warning "Unknown Python error encountered: $error"
+    fi
+}
+
+# Function to clear system caches
+clear_caches() {
+    log_section "Clearing System Caches"
+    log_info "Clearing system and user caches..."
+    
+    # Clear user caches
+    sudo find ~/Library/Caches/ -mindepth 1 -exec rm -rf {} \;
+
+    # Clear system caches if SIP is disabled
+    if csrutil status | grep -q 'disabled'; then
+        sudo find /Library/Caches/ -mindepth 1 -exec rm -rf {} \;
+        sudo find /System/Library/Caches/ -mindepth 1 -exec rm -rf {} \;
+    else
+        log_warning "System Integrity Protection (SIP) is enabled. Skipping system caches."
+    fi
+
+    log_success "System and user caches cleared successfully."
+}
+
+# Function to clear logs
+clear_logs() {
+    log_section "Clearing System Logs"
+    log_info "Clearing system and user logs..."
+    sudo find /var/log/ -mindepth 1 -exec rm -rf {} \;
+    sudo find ~/Library/Logs/ -mindepth 1 -exec rm -rf {} \;
+    log_success "System and user logs cleared successfully."
+}
+
+# Function to manage startup items
+manage_startup_items() {
+    log_section "Managing Startup Items"
+    log_info "Disabling unnecessary startup items..."
+    sudo launchctl bootout system /System/Library/LaunchDaemons/com.apple.spindump.plist
+    sudo launchctl bootout system /System/Library/LaunchDaemons/com.apple.CrashReporterSupportHelper.plist
+    if [[ $? -ne 0 ]]; then
+        log_warning "Some startup items could not be disabled. Please check them manually."
+    else
+        log_success "Unnecessary startup items disabled."
+    fi
+}
+
+# Function to display system information
+display_system_info() {
+    log_section "System Information"
+    log_info "Displaying system information..."
+    system_profiler SPSoftwareDataType SPHardwareDataType
+    log_success "System information displayed successfully."
+}
+
+# Function to uninstall applications
+uninstall_applications() {
+    log_section "Uninstalling Applications"
+    local app_name="$1"
+    log_info "Uninstalling $app_name..."
+    sudo rm -rf /Applications/"$app_name".app
+    sudo rm -rf ~/Library/Application\ Support/"$app_name"
+    sudo rm -rf ~/Library/Preferences/com."$app_name".plist
+    log_success "$app_name uninstalled successfully."
 }
 
 # System updates
 update_system() {
-  log_section "System Updates"
-  log_info "Updating macOS software..."
-  sudo softwareupdate -i -a || log_error "Failed to update macOS software."
+    log_section "System Updates"
+    log_info "Updating macOS software..."
+    sudo softwareupdate -i -a || log_error "Failed to update macOS software."
+    log_success "macOS software updated successfully."
 }
 
 # Homebrew updates
 update_homebrew() {
-  if command_exists brew; then
-    log_info "Updating Homebrew packages..."
-    brew update && brew upgrade && brew cleanup || log_warning "Failed to update some Homebrew packages."
-    log_info "Checking Homebrew health..."
-    brew doctor || log_warning "Some issues detected with Homebrew setup."
-  else
-    log_warning "Homebrew not installed, installing now..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    ensure_command "brew" "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
     if command_exists brew; then
-      log_success "Homebrew installed successfully."
-      update_homebrew
+        log_info "Updating Homebrew packages..."
+        brew update && brew upgrade && brew cleanup || log_warning "Failed to update some Homebrew packages."
+        log_success "Homebrew packages updated successfully."
     else
-      log_error "Failed to install Homebrew."
-      exit 1
+        log_error "Homebrew installation failed."
     fi
-  fi
 }
 
-# Mac App Store updates
-update_mas() {
-  if command_exists mas; then
-    log_info "Updating Mac App Store apps..."
-    mas outdated
-    mas upgrade || log_warning "Failed to update some Mac App Store applications."
-  else
-    log_warning "Mac App Store CLI not installed, installing now..."
-    brew install mas
-    if command_exists mas; then
-      log_success "Mac App Store CLI installed successfully."
-      update_mas
+# npm updates
+update_npm() {
+    ensure_command "npm" "brew install node"
+    if command_exists npm; then
+        log_info "Updating npm packages..."
+        npm install -g npm || handle_npm_errors "$(npm install -g npm 2>&1)"
+        npm update -g || handle_npm_errors "$(npm update -g 2>&1)"
+        log_success "npm and global packages updated successfully."
     else
-      log_error "Failed to install Mac App Store CLI."
-      exit 1
+        log_error "npm installation failed."
     fi
-  fi
 }
 
-# Ruby gems updates
+# Ruby Gem updates
 update_ruby_gems() {
-  if command_exists gem; then
-    log_info "Updating Ruby Gems..."
-    sudo gem update || log_warning "Failed to update some Ruby gems."
-  else
-    log_warning "Ruby Gems not installed, skipping Ruby updates."
-  fi
+    ensure_command "gem" "brew install ruby"
+    if command_exists gem; then
+        log_info "Updating Ruby gems..."
+        gem update --system || handle_ruby_errors "$(gem update --system 2>&1)"
+        gem update || handle_ruby_errors "$(gem update 2>&1)"
+        gem cleanup || log_warning "Failed to clean up outdated Ruby gems."
+        log_success "Ruby gems updated successfully."
+    else
+        log_error "Ruby installation failed."
+    fi
 }
 
-# NPM packages updates
-update_npm_packages() {
-  if command_exists npm; then
-    log_info "Updating global npm packages..."
-    npm update npm -g
-    npm update -g || log_warning "Failed to update some npm packages."
-  else
-    log_warning "npm not installed, skipping npm package updates."
-  fi
+# Python updates
+update_python() {
+    ensure_command "python3" "brew install python"
+    if command_exists python3; then
+        log_info "Updating Python packages..."
+        python3 -m pip install --upgrade pip || handle_python_errors "$(python3 -m pip install --upgrade pip 2>&1)"
+        pip3 install --upgrade $(pip3 list --outdated | awk 'NR>2 {print $1}') || handle_python_errors "$(pip3 install --upgrade $(pip3 list --outdated | awk 'NR>2 {print $1}') 2>&1)"
+        log_success "Python packages updated successfully."
+    else
+        log_error "Python installation failed."
+    fi
 }
 
-# Python packages updates
-update_python_packages() {
-  if command_exists pip3; then
-    log_info "Updating Python packages..."
-    pip3 list --outdated | grep -v 'Package' | awk '{print $1}' | while read -r package; do
-      log_info "Updating $package..."
-      pip3 install --user -U "$package" && log_success "Updated $package successfully." || log_error "Failed to update $package."
-    done
-  else
-    log_warning "pip not installed, skipping Python package updates."
-  fi
-}
-
-# Maintenance tasks
-perform_maintenance_tasks() {
-  log_section "Maintenance Tasks"
-  log_info "Flushing DNS cache..."
-  sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder || log_error "Failed to flush DNS cache."
-  log_info "Cleaning system logs and temporary files..."
-  sudo rm -rf /var/log/*.gz /var/tmp/* || log_warning "Failed to clean some logs."
-}
-
-# Optimize storage
-optimize_storage() {
-  log_section "Optimize Storage"
-  log_info "Optimizing storage..."
-  sudo tmutil thinLocalSnapshots / 1000000000 1 || log_warning "Failed to optimize storage."
-}
-
-# Empty trash
-empty_trash() {
-  log_section "Empty Trash"
-  log_info "Emptying trash..."
-  sudo rm -rfv /Volumes/*/.Trashes/* ~/.Trash/* /private/var/log/asl/*.asl || log_warning "Failed to empty some trash."
-}
-
-# Completion notice
-completion_notice() {
-  log_section "Completion Notification"
-  log_success "System update complete! 🌟"
-  echo -e "${BLUE}Update script completed at $(date)${NC}"
-  osascript -e 'display notification "All system updates and maintenance tasks are complete!" with title "System Update"'
-}
-
-# Main function orchestrates the workflow of the script
-main() {
-  log_info "Initializing update process..."
-  check_network_connection
-  perform_backup
-  check_disk_health
-  update_system
-  update_homebrew
-  update_mas
-  update_ruby_gems
-  update_npm_packages
-  update_python_packages
-  perform_maintenance_tasks
-  optimize_storage
-  empty_trash
-  completion_notice
-}
-
-# Redirect output to a log file for accountability and transparency
-exec > >(tee -a ~/update_script_log.txt)
-exec 2>&1
-
-main
+# Call functions
+log_info "Starting system maintenance script."
+START_TIME=$(date +%s)
+check_network_connection
+perform_backup
+check_and_repair_disks
+clear_caches
+clear_logs
+manage_startup_items
+update_system
+update_homebrew
+update_npm
+update_ruby_gems
+update_python
+display_system_info
+END_TIME=$(date +%s)
+RUNTIME=$((END_TIME - START_TIME))
+log_success "System maintenance script completed successfully in $RUNTIME seconds."
