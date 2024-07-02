@@ -1,12 +1,16 @@
 #!/bin/bash
 
 # Colors and Emoji Codes for readability and user feedback
-RED=$'\033[0;31m'
-GREEN=$'\033[0;32m'
-YELLOW=$'\033[1;33m'
-BLUE=$'\033[0;34m'
-BOLD=$'\033[1m'
-NC=$'\033[0m' # No Color
+if ! command -v tput >/dev/null 2>&1; then
+    echo "tput not found. Please install ncurses and try again."
+    exit 1
+fi
+RED=$(tput setaf 1)
+GREEN=$(tput setaf 2)
+YELLOW=$(tput setaf 3)
+BLUE=$(tput setaf 4)
+BOLD=$(tput bold)
+NC=$(tput sgr0) # No Color
 INFO_EMOJI="ℹ️"
 SUCCESS_EMOJI="✅"
 ERROR_EMOJI="❌"
@@ -16,8 +20,30 @@ NETWORK_EMOJI="🌐"
 # Ensure the script is not run as root to avoid Homebrew issues, except for specific commands
 if [[ $EUID -eq 0 ]]; then
     echo -e "${RED}${ERROR_EMOJI} This script must not be run as root${NC}" 1>&2
-    exit 1
+    read -p "Would you like to continue as a non-root user? [y/N]: " response
+    if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+        exec sudo -u $(logname) $0
+    else
+        exit 1
+    fi
 fi
+
+# Determine the user's shell
+USER_SHELL=$(basename "$SHELL")
+SHELL_RC_FILE=""
+
+case "$USER_SHELL" in
+    bash)
+        SHELL_RC_FILE="$HOME/.bashrc"
+        ;;
+    zsh)
+        SHELL_RC_FILE="$HOME/.zshrc"
+        ;;
+    *)
+        echo -e "${RED}${ERROR_EMOJI} Unsupported shell: $USER_SHELL. Please use bash or zsh.${NC}" 1>&2
+        exit 1
+        ;;
+esac
 
 # Function Definitions for Logging
 log_section() {
@@ -41,7 +67,7 @@ log_warning() {
 }
 
 # Trap to handle unexpected script termination and ensure cleanup
-trap 'log_error "Script terminated unexpectedly."; exit 1' SIGINT SIGTERM
+trap 'log_error "User exited the script by pressing Ctrl+C."; exit 1' SIGINT SIGTERM
 
 # Function to check if a command exists
 command_exists() {
@@ -51,10 +77,10 @@ command_exists() {
 # Automatically install missing commands
 ensure_command() {
     local command="$1"
-    local install_cmd="$2"
+    local install_cmd=("$2")
     if ! command_exists "$command"; then
         log_info "Installing $command..."
-        eval "$install_cmd" && log_success "$command installed successfully." || { log_error "Failed to install $command."; exit 1; }
+        "${install_cmd[@]}" && log_success "$command installed successfully." || { log_error "Failed to install $command."; exit 1; }
     fi
 }
 
@@ -62,23 +88,30 @@ ensure_command() {
 check_network_connection() {
     log_info "Checking network connectivity..."
     local hosts=("google.com" "cloudflare.com" "yahoo.com")
+    local all_successful=true
+
     for host in "${hosts[@]}"; do
         if ping -c 1 "$host" >/dev/null 2>&1; then
-            log_success "Network is up and running."
-            return
+            log_success "Network connection successful to $host."
         else
             log_warning "No network connection to $host."
+            all_successful=false
         fi
     done
-    log_error "No network connection. Please check your internet connection before proceeding."
-    exit 1
+
+    if $all_successful; then
+        log_success "All network connections are successful. Network is up and running."
+    else
+        log_error "Not all network connections are successful. Please check your internet connection."
+        exit 1
+    fi
 }
 
 # Enhanced backup function using rsync
 perform_backup() {
     log_section "Backup Process"
-    local backup_dir="/path/to/backup"  # Set the backup directory
-    local source_dir="$HOME"  # Set the source directory
+    local backup_dir="$1"
+    local source_dir="$2"
     if [ ! -d "$backup_dir" ]; then
         log_warning "Backup directory $backup_dir does not exist. Creating it..."
         mkdir -p "$backup_dir" || { log_error "Failed to create backup directory $backup_dir."; exit 1; }
@@ -189,7 +222,7 @@ handle_ruby_errors() {
         fi
     elif echo "$error" | grep -q "Gem::FilePermissionError"; then
         log_warning "Fixing Ruby Gem permissions error..."
-        sudo chown -R $(whoami) /Library/Ruby/Gems/2.6.0
+        sudo chown -R $(whoami) $(gem env gemdir)
     elif echo "$error" | grep -q "There are no versions of"; then
         log_warning "Handling incompatible Ruby gem issue..."
         local gem_name=$(echo "$error" | grep -o "Error installing .*" | awk '{print $3}')
@@ -200,12 +233,13 @@ handle_ruby_errors() {
     elif echo "$error" | grep -q "requires Ruby version"; then
         log_warning "Fixing Ruby version issue by installing and setting up rbenv..."
         brew install rbenv ruby-build
-        echo 'eval "$(rbenv init -)"' >> ~/.zshrc
-        source ~/.zshrc
-        if ! rbenv versions | grep -q "3.1.2"; then
-            rbenv install 3.1.2
+        echo 'eval "$(rbenv init -)"' >> "$SHELL_RC_FILE"
+        source "$SHELL_RC_FILE"
+        latest_ruby=$(rbenv install -l | grep -v - | tail -1)
+        if ! rbenv versions | grep -q "$latest_ruby"; then
+            rbenv install "$latest_ruby"
         fi
-        rbenv global 3.1.2
+        rbenv global "$latest_ruby"
         ruby -v
         gem install rubygems-update
         update_rubygems
@@ -214,9 +248,24 @@ handle_ruby_errors() {
         local missing_gem=$(echo "$error" | grep -o "No such file or directory - .*" | awk '{print $6}')
         gem uninstall "$missing_gem" --force
         gem install "$missing_gem"
+    elif echo "$error" | grep -q "rvm is not a function"; then
+        log_warning "Handling RVM issue..."
+        rvm implode --force || log_warning "Failed to implode RVM. Manual intervention required."
     else
         log_warning "Unknown Ruby error encountered: $error"
     fi
+}
+
+# Function to handle Ruby gem extension errors
+handle_ruby_gem_extensions() {
+    log_section "Handling Ruby Gem Extensions"
+    log_info "Rebuilding gem extensions..."
+    gem list | grep "extensions are not built" | awk '{print $1}' | while read -r gem_name; do
+        version=$(gem list "$gem_name" --local | grep "$gem_name" | awk '{print $2}' | tr -d '()')
+        log_info "Rebuilding $gem_name --version $version..."
+        gem pristine "$gem_name" --version "$version"
+    done
+    log_success "Gem extensions rebuilt successfully."
 }
 
 # Function to handle Python errors
@@ -334,22 +383,19 @@ update_ruby_gems() {
     ensure_command "rbenv" "brew install rbenv ruby-build"
     if command_exists rbenv; then
         log_info "Updating Ruby gems using rbenv..."
-        echo 'eval "$(rbenv init -)"' >> ~/.zshrc
-        source ~/.zshrc
-        if ! rbenv versions | grep -q "3.1.2"; then
-            rbenv install 3.1.2
+        echo 'eval "$(rbenv init -)"' >> "$SHELL_RC_FILE"
+        source "$SHELL_RC_FILE"
+        latest_ruby=$(rbenv install -l | grep -v - | tail -1)
+        if ! rbenv versions | grep -q "$latest_ruby"; then
+            rbenv install "$latest_ruby"
         fi
-        rbenv global 3.1.2
+        rbenv global "$latest_ruby"
         ruby -v
         gem install rubygems-update
         update_rubygems
         gem update || handle_ruby_errors "$(gem update 2>&1)"
+        handle_ruby_gem_extensions
         gem cleanup || log_warning "Failed to clean up outdated Ruby gems."
-        # Handle pristine gems
-        gem list --local | grep "Ignoring" | while read -r line; do
-            gem_name=$(echo "$line" | awk '{print $2}' | tr -d ",")
-            gem pristine "$gem_name" --version "$(echo "$line" | awk '{print $4}')"
-        done
         log_success "Ruby gems updated successfully."
     else
         log_error "rbenv installation failed."
@@ -384,7 +430,7 @@ check_disk_space() {
 log_info "Starting system maintenance script."
 START_TIME=$(date +%s)
 check_network_connection
-perform_backup
+# perform_backup "/path/to/backup" "$HOME"  # Uncomment and set correct paths for backup
 check_and_repair_disks
 check_disk_space
 clear_caches
