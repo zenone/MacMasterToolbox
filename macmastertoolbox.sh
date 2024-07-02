@@ -13,30 +13,11 @@ ERROR_EMOJI="❌"
 WARNING_EMOJI="⚠️"
 NETWORK_EMOJI="🌐"
 
-# Ensure the script is not run as root to avoid Homebrew issues
+# Ensure the script is not run as root to avoid Homebrew issues, except for specific commands
 if [[ $EUID -eq 0 ]]; then
     echo -e "${RED}${ERROR_EMOJI} This script must not be run as root${NC}" 1>&2
     exit 1
 fi
-
-# Function to check if a command exists
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
-
-# Automatically install missing commands
-ensure_command() {
-    local command="$1"
-    local install_cmd="$2"
-    if ! command_exists "$command"; then
-        log_info "Installing $command..."
-        eval "$install_cmd"
-        if ! command_exists "$command"; then
-            log_error "Failed to install $command."
-            exit 1
-        fi
-    fi
-}
 
 # Function Definitions for Logging
 log_section() {
@@ -59,65 +40,87 @@ log_warning() {
     echo -e "${YELLOW}${WARNING_EMOJI} $1${NC}"
 }
 
+# Trap to handle unexpected script termination and ensure cleanup
+trap 'log_error "Script terminated unexpectedly."; exit 1' SIGINT SIGTERM
+
+# Function to check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Automatically install missing commands
+ensure_command() {
+    local command="$1"
+    local install_cmd="$2"
+    if ! command_exists "$command"; then
+        log_info "Installing $command..."
+        eval "$install_cmd" && log_success "$command installed successfully." || { log_error "Failed to install $command."; exit 1; }
+    fi
+}
+
 # Function to check network connectivity
 check_network_connection() {
     log_info "Checking network connectivity..."
-    if ! ping -c 1 google.com >/dev/null 2>&1; then
-        log_error "No network connection. Please check your internet connection before proceeding."
-        exit 1
-    fi
-    log_success "Network is up and running."
+    local hosts=("google.com" "cloudflare.com" "yahoo.com")
+    for host in "${hosts[@]}"; do
+        if ping -c 1 "$host" >/dev/null 2>&1; then
+            log_success "Network is up and running."
+            return
+        else
+            log_warning "No network connection to $host."
+        fi
+    done
+    log_error "No network connection. Please check your internet connection before proceeding."
+    exit 1
 }
 
-# Placeholder function for backup
+# Enhanced backup function using rsync
 perform_backup() {
     log_section "Backup Process"
-    log_info "Creating a backup..."
-    # Placeholder for actual backup command
+    local backup_dir="/path/to/backup"  # Set the backup directory
+    local source_dir="$HOME"  # Set the source directory
+    if [ ! -d "$backup_dir" ]; then
+        log_warning "Backup directory $backup_dir does not exist. Creating it..."
+        mkdir -p "$backup_dir" || { log_error "Failed to create backup directory $backup_dir."; exit 1; }
+    fi
+    if [ ! -w "$backup_dir" ]; then
+        log_error "Backup directory $backup_dir is not writable."
+        exit 1
+    fi
+    log_info "Creating a backup using rsync..."
+    rsync -avh --delete "$source_dir" "$backup_dir" || { log_error "Backup failed. Please check the backup directory and permissions."; exit 1; }
     log_success "Backup created successfully."
 }
 
-# Function to check and repair disk health
+# Enhanced function to check and repair disk health
 check_and_repair_disks() {
     log_section "Checking and Repairing Disk Health"
     log_info "Checking disk health..."
     disks=$(diskutil list | grep '^/dev/' | awk '{print $1}')
     for disk in $disks; do
-        log_info "Verifying $disk..."
-        if diskutil verifyDisk "$disk" >/dev/null 2>&1; then
-            log_info "Verification successful for $disk."
-        else
+        log_info "Verifying and repairing $disk..."
+        if ! diskutil verifyDisk "$disk" >/dev/null 2>&1; then
             log_warning "Verification failed for $disk. Attempting repair..."
-            if diskutil repairDisk "$disk" >/dev/null 2>&1; then
-                log_success "Repair successful for $disk."
+            if ! diskutil repairDisk "$disk" >/dev/null 2>&1; then
+                log_error "Repair failed for $disk. Please check the disk manually."
             else
-                log_error "Repair failed for $disk. Retrying..."
-                # Retry mechanism
-                if diskutil repairDisk "$disk" >/dev/null 2>&1; then
-                    log_success "Repair successful for $disk on retry."
-                else
-                    log_error "Repair failed for $disk on retry. Please check the disk manually."
-                fi
+                log_success "Repair successful for $disk."
             fi
+        else
+            log_info "Verification successful for $disk."
         fi
         partitions=$(diskutil list "$disk" | grep '^/dev/' | awk '{print $1}')
         for partition in $partitions; do
-            log_info "Verifying $partition..."
-            if diskutil verifyVolume "$partition" >/dev/null 2>&1; then
-                log_info "Verification successful for $partition."
-            else
+            log_info "Verifying and repairing $partition..."
+            if ! diskutil verifyVolume "$partition" >/dev/null 2>&1; then
                 log_warning "Verification failed for $partition. Attempting repair..."
-                if diskutil repairVolume "$partition" >/dev/null 2>&1; then
-                    log_success "Repair successful for $partition."
+                if ! diskutil repairVolume "$partition" >/dev/null 2>&1; then
+                    log_error "Repair failed for $partition. Please check the partition manually."
                 else
-                    log_error "Repair failed for $partition. Retrying..."
-                    # Retry mechanism
-                    if diskutil repairVolume "$partition" >/dev/null 2>&1; then
-                        log_success "Repair successful for $partition on retry."
-                    else
-                        log_error "Repair failed for $partition on retry. Please check the partition manually."
-                    fi
+                    log_success "Repair successful for $partition."
                 fi
+            else
+                log_info "Verification successful for $partition."
             fi
         done
     done
@@ -133,11 +136,11 @@ handle_npm_errors() {
         sudo chown -R $(whoami) ~/.npm
     elif echo "$error" | grep -q "E404"; then
         log_warning "Removing invalid npm package..."
-        local invalid_package=$(echo "$error" | grep -oP "(?<=404  ').*(?= is not in this registry)")
+        local invalid_package=$(echo "$error" | grep -o "404  .*  - Not found" | awk '{print $2}')
         npm uninstall -g "$invalid_package" || true
     elif echo "$error" | grep -q "EUSAGE"; then
         log_warning "Fixing npm usage error..."
-        npm uninstall -g $(echo "$error" | grep -oP "(?<=Usage:).*") || true
+        npm uninstall -g $(echo "$error" | grep -o "Usage: .*" | awk '{print $2}') || true
     elif echo "$error" | grep -q "EACCESS"; then
         log_warning "Fixing npm EACCESS error..."
         sudo chown -R $(whoami) ~/.npm
@@ -148,7 +151,31 @@ handle_npm_errors() {
     fi
 }
 
-# Function to handle Ruby errors
+# Function to handle deprecated npm packages
+handle_npm_deprecated_warnings() {
+    log_section "Handling npm Deprecated Warnings"
+    local warnings=(
+        "inflight"
+        "phin"
+        "string-similarity"
+        "har-validator"
+        "rimraf"
+        "abab"
+        "glob"
+        "w3c-hr-time"
+        "domexception"
+        "uuid"
+        "@applitools/eyes-sdk-core"
+        "request"
+        "sinon"
+    )
+    for package in "${warnings[@]}"; do
+        log_info "Removing deprecated npm package: $package"
+        npm uninstall -g "$package" || log_warning "Failed to remove $package. Manual intervention required."
+    done
+}
+
+# Function to handle Ruby errors and manage Ruby using rbenv
 handle_ruby_errors() {
     log_section "Handling Ruby Errors"
     local error="$1"
@@ -165,11 +192,28 @@ handle_ruby_errors() {
         sudo chown -R $(whoami) /Library/Ruby/Gems/2.6.0
     elif echo "$error" | grep -q "There are no versions of"; then
         log_warning "Handling incompatible Ruby gem issue..."
-        local gem_name=$(echo "$error" | grep -oP "(?<=Error installing ).*(?= there are no versions of)")
+        local gem_name=$(echo "$error" | grep -o "Error installing .*" | awk '{print $3}')
         log_info "Uninstalling incompatible gem: $gem_name..."
         gem uninstall "$gem_name"
         log_info "Installing compatible version of $gem_name..."
         gem install "$gem_name" -v "$(gem search "^$gem_name$" --remote | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
+    elif echo "$error" | grep -q "requires Ruby version"; then
+        log_warning "Fixing Ruby version issue by installing and setting up rbenv..."
+        brew install rbenv ruby-build
+        echo 'eval "$(rbenv init -)"' >> ~/.zshrc
+        source ~/.zshrc
+        if ! rbenv versions | grep -q "3.1.2"; then
+            rbenv install 3.1.2
+        fi
+        rbenv global 3.1.2
+        ruby -v
+        gem install rubygems-update
+        update_rubygems
+    elif echo "$error" | grep -q "Errno::ENOENT"; then
+        log_warning "Handling missing file error..."
+        local missing_gem=$(echo "$error" | grep -o "No such file or directory - .*" | awk '{print $6}')
+        gem uninstall "$missing_gem" --force
+        gem install "$missing_gem"
     else
         log_warning "Unknown Ruby error encountered: $error"
     fi
@@ -185,6 +229,8 @@ handle_python_errors() {
         python3 -m venv /tmp/python-venv
         source /tmp/python-venv/bin/activate
         log_info "Virtual environment created and activated."
+        pip install --upgrade pip
+        pip install $(pip list --outdated | awk 'NR>2 {print $1}') || log_warning "Failed to update some Python packages."
     elif echo "$error" | grep -q "normal site-packages is not writeable"; then
         log_warning "Defaulting to user installation due to non-writable site-packages..."
         python3 -m pip install --user --upgrade pip
@@ -222,13 +268,23 @@ clear_logs() {
 manage_startup_items() {
     log_section "Managing Startup Items"
     log_info "Disabling unnecessary startup items..."
-    sudo launchctl bootout system /System/Library/LaunchDaemons/com.apple.spindump.plist
-    sudo launchctl bootout system /System/Library/LaunchDaemons/com.apple.CrashReporterSupportHelper.plist
-    if [[ $? -ne 0 ]]; then
-        log_warning "Some startup items could not be disabled. Please check them manually."
-    else
-        log_success "Unnecessary startup items disabled."
-    fi
+    for plist in /System/Library/LaunchDaemons/com.apple.spindump.plist /System/Library/LaunchDaemons/com.apple.CrashReporterSupportHelper.plist; do
+        if sudo launchctl bootout system "$plist"; then
+            log_success "Disabled $plist"
+        else
+            log_warning "Failed to disable $plist. Attempting unload..."
+            if sudo launchctl unload "$plist"; then
+                log_success "Unloaded $plist"
+            else
+                log_warning "Failed to unload $plist. Attempting with root privileges..."
+                if sudo -n true; then
+                    sudo launchctl bootout system "$plist" || sudo launchctl unload "$plist" || log_error "Failed to manage $plist. Manual intervention required."
+                else
+                    log_warning "Root privileges required to manage $plist. Skipping..."
+                fi
+            fi
+        fi
+    done
 }
 
 # Function to display system information
@@ -266,23 +322,37 @@ update_npm() {
         log_info "Updating npm packages..."
         npm install -g npm || handle_npm_errors "$(npm install -g npm 2>&1)"
         npm update -g || handle_npm_errors "$(npm update -g 2>&1)"
+        handle_npm_deprecated_warnings
         log_success "npm and global packages updated successfully."
     else
         log_error "npm installation failed."
     fi
 }
 
-# Ruby Gem updates
+# Ruby Gem updates using rbenv
 update_ruby_gems() {
-    ensure_command "gem" "brew install ruby"
-    if command_exists gem; then
-        log_info "Updating Ruby gems..."
-        gem update --system || handle_ruby_errors "$(gem update --system 2>&1)"
+    ensure_command "rbenv" "brew install rbenv ruby-build"
+    if command_exists rbenv; then
+        log_info "Updating Ruby gems using rbenv..."
+        echo 'eval "$(rbenv init -)"' >> ~/.zshrc
+        source ~/.zshrc
+        if ! rbenv versions | grep -q "3.1.2"; then
+            rbenv install 3.1.2
+        fi
+        rbenv global 3.1.2
+        ruby -v
+        gem install rubygems-update
+        update_rubygems
         gem update || handle_ruby_errors "$(gem update 2>&1)"
         gem cleanup || log_warning "Failed to clean up outdated Ruby gems."
+        # Handle pristine gems
+        gem list --local | grep "Ignoring" | while read -r line; do
+            gem_name=$(echo "$line" | awk '{print $2}' | tr -d ",")
+            gem pristine "$gem_name" --version "$(echo "$line" | awk '{print $4}')"
+        done
         log_success "Ruby gems updated successfully."
     else
-        log_error "Ruby installation failed."
+        log_error "rbenv installation failed."
     fi
 }
 
@@ -291,11 +361,22 @@ update_python() {
     ensure_command "python3" "brew install python"
     if command_exists python3; then
         log_info "Updating Python packages..."
-        python3 -m pip install --upgrade pip || handle_python_errors "$(python3 -m pip install --upgrade pip 2>&1)"
-        pip3 install --upgrade $(pip3 list --outdated | awk 'NR>2 {print $1}') || handle_python_errors "$(pip3 install --upgrade $(pip3 list --outdated | awk 'NR>2 {print $1}') 2>&1)"
+        handle_python_errors "externally-managed-environment"
         log_success "Python packages updated successfully."
     else
         log_error "Python installation failed."
+    fi
+}
+
+# Check for disk space
+check_disk_space() {
+    log_section "Checking Disk Space"
+    log_info "Checking available disk space..."
+    if df -h / | awk '$6=="/"{print $5}' | grep -q '^[8-9][0-9]%;\|100%'; then
+        log_warning "Disk space is running low. Please free up some space before proceeding."
+        exit 1
+    else
+        log_success "Sufficient disk space available."
     fi
 }
 
@@ -305,6 +386,7 @@ START_TIME=$(date +%s)
 check_network_connection
 perform_backup
 check_and_repair_disks
+check_disk_space
 clear_caches
 clear_logs
 manage_startup_items
