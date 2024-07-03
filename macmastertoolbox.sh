@@ -1,34 +1,65 @@
 #!/bin/bash
 
 # Colors and Emoji Codes for readability and user feedback
-if ! command -v tput >/dev/null 2>&1; then
-    echo "tput not found. Please install ncurses and try again."
-    exit 1
+if command -v tput >/dev/null 2>&1; then
+    if [ "$(tput colors)" -ge 8 ]; then
+        RED=$(tput setaf 1)
+        GREEN=$(tput setaf 2)
+        YELLOW=$(tput setaf 3)
+        BLUE=$(tput setaf 4)
+        BOLD=$(tput bold)
+        NC=$(tput sgr0) # No Color
+    else
+        RED=""
+        GREEN=""
+        YELLOW=""
+        BLUE=""
+        BOLD=""
+        NC=""
+    fi
+else
+    RED=""
+    GREEN=""
+    YELLOW=""
+    BLUE=""
+    BOLD=""
+    NC=""
+    echo "tput not found or terminal does not support colors. Proceeding without color support."
 fi
-RED=$(tput setaf 1)
-GREEN=$(tput setaf 2)
-YELLOW=$(tput setaf 3)
-BLUE=$(tput setaf 4)
-BOLD=$(tput bold)
-NC=$(tput sgr0) # No Color
+
+# Emoji codes
 INFO_EMOJI="ℹ️"
 SUCCESS_EMOJI="✅"
 ERROR_EMOJI="❌"
 WARNING_EMOJI="⚠️"
 NETWORK_EMOJI="🌐"
 
-# Ensure the script is not run as root to avoid Homebrew issues, except for specific commands
+# Ensure the script is not run as root to avoid Homebrew issues
 if [[ $EUID -eq 0 ]]; then
     echo -e "${RED}${ERROR_EMOJI} This script must not be run as root${NC}" 1>&2
-    read -p "Would you like to continue as a non-root user? [y/N]: " response
-    if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
-        exec sudo -u $(logname) $0
-    else
-        exit 1
-    fi
+    while true; do
+        read -p "Would you like to continue as a non-root user? [y/N]: " response
+        case "$response" in
+            [yY][eE][sS]|[yY])
+                if command -v sudo >/dev/null 2>&1; then
+                    exec sudo -u "$(logname)" "$0"
+                else
+                    echo -e "${RED}${ERROR_EMOJI} sudo not found. Cannot continue as non-root user.${NC}"
+                    exit 1
+                fi
+                ;;
+            [nN][oO]|[nN]|"")
+                echo -e "${RED}${ERROR_EMOJI} Exiting script.${NC}"
+                exit 1
+                ;;
+            *)
+                echo -e "${YELLOW}${WARNING_EMOJI} Invalid input. Please enter y or n.${NC}"
+                ;;
+        esac
+    done
 fi
 
-# Determine the user's shell
+# Determine the user's shell and configuration file
 USER_SHELL=$(basename "$SHELL")
 SHELL_RC_FILE=""
 
@@ -39,35 +70,38 @@ case "$USER_SHELL" in
     zsh)
         SHELL_RC_FILE="$HOME/.zshrc"
         ;;
+    fish)
+        SHELL_RC_FILE="$HOME/.config/fish/config.fish"
+        ;;
     *)
-        echo -e "${RED}${ERROR_EMOJI} Unsupported shell: $USER_SHELL. Please use bash or zsh.${NC}" 1>&2
+        echo -e "${RED}${ERROR_EMOJI} Unsupported shell: $USER_SHELL. Please use bash, zsh, or fish.${NC}" 1>&2
         exit 1
         ;;
 esac
 
-# Function Definitions for Logging
-log_section() {
-    echo -e "\n${YELLOW}${BOLD}--- $1 ---${NC}"
+# Create shell configuration file if it does not exist
+if [ ! -f "$SHELL_RC_FILE" ]; then
+    touch "$SHELL_RC_FILE"
+    echo -e "${YELLOW}${WARNING_EMOJI} $SHELL_RC_FILE not found. Creating it.${NC}"
+fi
+
+# Logging functions
+log() {
+    local type="$1"
+    local message="$2"
+    local color="$3"
+    local emoji="$4"
+    echo -e "${color}${emoji} ${message}${NC}"
 }
 
-log_info() {
-    echo -e "${BLUE}${INFO_EMOJI} $1${NC}"
-}
-
-log_success() {
-    echo -e "${GREEN}${SUCCESS_EMOJI} $1${NC}"
-}
-
-log_error() {
-    echo -e "${RED}${ERROR_EMOJI} $1${NC}"
-}
-
-log_warning() {
-    echo -e "${YELLOW}${WARNING_EMOJI} $1${NC}"
-}
+log_section() { log "section" "$1" "${YELLOW}${BOLD}" "---"; }
+log_info() { log "info" "$1" "${BLUE}" "$INFO_EMOJI"; }
+log_success() { log "success" "$1" "${GREEN}" "$SUCCESS_EMOJI"; }
+log_error() { log "error" "$1" "${RED}" "$ERROR_EMOJI"; }
+log_warning() { log "warning" "$1" "${YELLOW}" "$WARNING_EMOJI"; }
 
 # Trap to handle unexpected script termination and ensure cleanup
-trap 'log_error "User exited the script by pressing Ctrl+C."; exit 1' SIGINT SIGTERM
+trap 'log_error "User exited the script by pressing Ctrl+C."; exit 1' SIGINT SIGTERM SIGHUP SIGQUIT
 
 # Function to check if a command exists
 command_exists() {
@@ -77,26 +111,34 @@ command_exists() {
 # Automatically install missing commands
 ensure_command() {
     local command="$1"
-    local install_cmd=("$2")
+    shift
+    local install_cmd=("$@")
     if ! command_exists "$command"; then
         log_info "Installing $command..."
         "${install_cmd[@]}" && log_success "$command installed successfully." || { log_error "Failed to install $command."; exit 1; }
     fi
 }
 
-# Function to check network connectivity
+# Function to check network connectivity with retries
 check_network_connection() {
     log_info "Checking network connectivity..."
     local hosts=("google.com" "cloudflare.com" "yahoo.com")
     local all_successful=true
+    local retries=3
 
     for host in "${hosts[@]}"; do
-        if ping -c 1 "$host" >/dev/null 2>&1; then
-            log_success "Network connection successful to $host."
-        else
-            log_warning "No network connection to $host."
-            all_successful=false
-        fi
+        for ((i=1; i<=retries; i++)); do
+            if curl -Is "$host" >/dev/null 2>&1; then
+                log_success "Network connection successful to $host."
+                break
+            elif [[ $i -eq $retries ]]; then
+                log_warning "No network connection to $host after $retries attempts."
+                all_successful=false
+            else
+                log_info "Retrying network connection to $host ($i/$retries)..."
+            fi
+            sleep 1
+        done
     done
 
     if $all_successful; then
@@ -107,11 +149,14 @@ check_network_connection() {
     fi
 }
 
-# Enhanced backup function using rsync
+# Backup function using rsync with options and progress
 perform_backup() {
     log_section "Backup Process"
     local backup_dir="$1"
     local source_dir="$2"
+    shift 2
+    local exclude=("$@")
+
     if [ ! -d "$backup_dir" ]; then
         log_warning "Backup directory $backup_dir does not exist. Creating it..."
         mkdir -p "$backup_dir" || { log_error "Failed to create backup directory $backup_dir."; exit 1; }
@@ -120,35 +165,45 @@ perform_backup() {
         log_error "Backup directory $backup_dir is not writable."
         exit 1
     fi
+
     log_info "Creating a backup using rsync..."
-    rsync -avh --delete "$source_dir" "$backup_dir" || { log_error "Backup failed. Please check the backup directory and permissions."; exit 1; }
+    local exclude_opts=()
+    for ex in "${exclude[@]}"; do
+        exclude_opts+=("--exclude=$ex")
+    done
+
+    rsync -avh --progress --delete "${exclude_opts[@]}" "$source_dir" "$backup_dir" || { log_error "Backup failed. Please check the backup directory and permissions."; exit 1; }
     log_success "Backup created successfully."
 }
 
-# Enhanced function to check and repair disk health
 check_and_repair_disks() {
     log_section "Checking and Repairing Disk Health"
     log_info "Checking disk health..."
     disks=$(diskutil list | grep '^/dev/' | awk '{print $1}')
+    local any_failures=false
+
     for disk in $disks; do
-        log_info "Verifying and repairing $disk..."
+        log_info "Verifying $disk..."
         if ! diskutil verifyDisk "$disk" >/dev/null 2>&1; then
             log_warning "Verification failed for $disk. Attempting repair..."
             if ! diskutil repairDisk "$disk" >/dev/null 2>&1; then
-                log_error "Repair failed for $disk. Please check the disk manually."
+                log_error "Repair failed for $disk. Please check the disk manually. You may use 'diskutil list' and 'diskutil info $disk' for more details."
+                any_failures=true
             else
                 log_success "Repair successful for $disk."
             fi
         else
             log_info "Verification successful for $disk."
         fi
+
         partitions=$(diskutil list "$disk" | grep '^/dev/' | awk '{print $1}')
         for partition in $partitions; do
-            log_info "Verifying and repairing $partition..."
+            log_info "Verifying $partition..."
             if ! diskutil verifyVolume "$partition" >/dev/null 2>&1; then
                 log_warning "Verification failed for $partition. Attempting repair..."
                 if ! diskutil repairVolume "$partition" >/dev/null 2>&1; then
-                    log_error "Repair failed for $partition. Please check the partition manually."
+                    log_error "Repair failed for $partition. Please check the partition manually. You may use 'diskutil verifyVolume $partition' and 'diskutil repairVolume $partition' for more details."
+                    any_failures=true
                 else
                     log_success "Repair successful for $partition."
                 fi
@@ -157,31 +212,52 @@ check_and_repair_disks() {
             fi
         done
     done
+
+    if $any_failures; then
+        log_error "Some disks or partitions could not be verified or repaired."
+        log_error "Manual intervention is required. Refer to the diskutil commands mentioned in the logs for further assistance."
+    else
+        log_success "All disks and partitions were verified and repaired successfully."
+    fi
 }
 
+# Function to handle npm errors with fallback for unknown errors
 handle_npm_errors() {
     log_section "Handling npm Errors"
     local error="$1"
     if echo "$error" | grep -q "EACCES"; then
         log_warning "Fixing npm permissions..."
-        sudo chown -R $(whoami) /opt/homebrew/lib/node_modules/npm /opt/homebrew/lib/node_modules/.npm-*
-        sudo chown -R $(whoami) ~/.npm
+        sudo chown -R "$(whoami)" /opt/homebrew/lib/node_modules/npm /opt/homebrew/lib/node_modules/.npm-*
+        sudo chown -R "$(whoami)" ~/.npm
     elif echo "$error" | grep -q "E404"; then
         log_warning "Removing invalid npm package..."
-        local invalid_package=$(echo "$error" | grep -o "'@[^/]\+/\.[^@]\+@[^']\+'" | tr -d "'")
+        local invalid_package=$(echo "$error" | grep -o "'@[^/]\+/.+'" | tr -d "'")
         npm uninstall -g "$invalid_package" || true
-        sed -i.bak "/\"$invalid_package\": \".*\"/d" package.json
-        log_success "Removed invalid npm package: $invalid_package"
+        if [ -f package.json ]; then
+            if sed -i.bak "/\"$invalid_package\": \".*\"/d" package.json; then
+                log_success "Removed invalid package from package.json: $invalid_package"
+                log_info "Cleaning npm cache..."
+                npm cache clean --force
+                log_info "Reinstalling npm dependencies..."
+                npm install
+            else
+                log_warning "Failed to remove invalid package from package.json. Manual intervention required. Please check and remove the invalid package entry manually."
+            fi
+        else
+            log_warning "package.json not found. Manual intervention required. Please create or restore the package.json file."
+        fi
     elif echo "$error" | grep -q "EUSAGE"; then
         log_warning "Fixing npm usage error..."
-        npm uninstall -g $(echo "$error" | grep -o "Usage: .*" | awk '{print $2}') || true
+        npm uninstall -g "$(echo "$error" | grep -o "Usage: .*" | awk '{print $2}')" || true
     elif echo "$error" | grep -q "EACCESS"; then
         log_warning "Fixing npm EACCESS error..."
-        sudo chown -R $(whoami) ~/.npm
-        sudo chown -R $(whoami) /usr/local/lib/node_modules
-        sudo chown -R $(whoami) /opt/homebrew/lib/node_modules
+        sudo chown -R "$(whoami)" ~/.npm
+        sudo chown -R "$(whoami)" /usr/local/lib/node_modules
+        sudo chown -R "$(whoami)" /opt/homebrew/lib/node_modules
     else
         log_warning "Unknown npm error encountered: $error"
+        echo "$error" > /tmp/npm_error.log
+        log_warning "Logged unknown npm error to /tmp/npm_error.log. Consider running 'npm cache clean' to resolve potential inconsistencies."
     fi
 }
 
@@ -194,7 +270,7 @@ handle_npm_deprecated_warnings() {
     done
 }
 
-# Function to handle Ruby errors and manage Ruby using rbenv
+# Function to handle Ruby errors and manage Ruby using rbenv with fallback for unknown errors
 handle_ruby_errors() {
     log_section "Handling Ruby Errors"
     local error="$1"
@@ -208,10 +284,11 @@ handle_ruby_errors() {
         fi
     elif echo "$error" | grep -q "Gem::FilePermissionError"; then
         log_warning "Fixing Ruby Gem permissions error..."
-        sudo chown -R $(whoami) $(gem env gemdir)
+        sudo chown -R "$(whoami)" "$(gem env gemdir)"
     elif echo "$error" | grep -q "There are no versions of"; then
         log_warning "Handling incompatible Ruby gem issue..."
-        local gem_name=$(echo "$error" | grep -o "Error installing .*" | awk '{print $3}')
+        local gem_name
+        gem_name=$(echo "$error" | grep -o "Error installing .*" | awk '{print $3}')
         log_info "Uninstalling incompatible gem: $gem_name..."
         gem uninstall "$gem_name"
         log_info "Installing compatible version of $gem_name..."
@@ -231,7 +308,8 @@ handle_ruby_errors() {
         update_rubygems
     elif echo "$error" | grep -q "Errno::ENOENT"; then
         log_warning "Handling missing file error..."
-        local missing_gem=$(echo "$error" | grep -o "No such file or directory - .*" | awk '{print $6}')
+        local missing_gem
+        missing_gem=$(echo "$error" | grep -o "No such file or directory - .*" | awk '{print $6}')
         gem uninstall "$missing_gem" --force
         gem install "$missing_gem"
     elif echo "$error" | grep -q "rvm is not a function"; then
@@ -239,6 +317,8 @@ handle_ruby_errors() {
         rvm implode --force || log_warning "Failed to implode RVM. Manual intervention required."
     else
         log_warning "Unknown Ruby error encountered: $error"
+        echo "$error" > /tmp/ruby_error.log
+        log_warning "Logged unknown Ruby error to /tmp/ruby_error.log"
     fi
 }
 
@@ -254,7 +334,7 @@ handle_ruby_gem_extensions() {
     log_success "Gem extensions rebuilt successfully."
 }
 
-# Function to handle Python errors
+# Function to handle Python errors with fallback for unknown errors
 handle_python_errors() {
     log_section "Handling Python Errors"
     local error="$1"
@@ -265,15 +345,29 @@ handle_python_errors() {
         source /tmp/python-venv/bin/activate
         log_info "Virtual environment created and activated."
         pip install --upgrade pip
-        pip install $(pip list --outdated | awk 'NR>2 {print $1}') || log_warning "Failed to update some Python packages."
+        pip list --outdated | awk 'NR>2 {print $1}' | while read -r package; do
+            if [ -n "$package" ]; then
+                pip install --upgrade "$package" || log_warning "Failed to update Python package: $package"
+            else
+                log_warning "Invalid package name encountered during Python package update. Skipping..."
+            fi
+        done
     elif echo "$error" | grep -q "normal site-packages is not writeable"; then
         log_warning "Defaulting to user installation due to non-writable site-packages..."
         python3 -m pip install --user --upgrade pip
-        pip3 install --user --upgrade $(pip3 list --outdated | awk 'NR>2 {print $1}') || log_warning "Failed to update some Python packages."
+        pip3 list --outdated | awk 'NR>2 {print $1}' | while read -r package; do
+            if [ -n "$package" ]; then
+                pip3 install --user --upgrade "$package" || log_warning "Failed to update Python package: $package"
+            else
+                log_warning "Invalid package name encountered during Python package update. Skipping..."
+            fi
+        done
     elif echo "$error" | grep -q "ERROR: You must give at least one requirement to install"; then
         log_warning "No requirements specified for pip install. Skipping..."
     else
         log_warning "Unknown Python error encountered: $error"
+        echo "$error" > /tmp/python_error.log
+        log_warning "Logged unknown Python error to /tmp/python_error.log"
     fi
 }
 
@@ -283,6 +377,7 @@ clear_caches() {
     log_info "Clearing system and user caches..."
     if csrutil status | grep -q "enabled"; then
         log_warning "System Integrity Protection (SIP) is enabled. Skipping system caches."
+        log_warning "System Integrity Protection (SIP) is a security technology in macOS that helps protect the system by preventing potentially malicious software from modifying protected files and folders. With SIP enabled, certain system caches cannot be cleared."
     else
         sudo find /Library/Caches -type f -delete 2>/dev/null || log_warning "Some system caches could not be cleared."
     fi
@@ -313,7 +408,17 @@ manage_startup_items() {
             else
                 log_warning "Failed to unload $plist. Attempting with root privileges..."
                 if sudo -n true; then
-                    sudo launchctl bootout system "$plist" || sudo launchctl unload "$plist" || log_error "Failed to manage $plist. Manual intervention required."
+                    if sudo launchctl bootout system "$plist"; then
+                        log_success "Disabled $plist with root privileges."
+                    elif sudo launchctl unload "$plist"; then
+                        log_success "Unloaded $plist with root privileges."
+                    else
+                        log_error "Failed to manage $plist even with root privileges. Manual intervention required."
+                        log_error "Try the following commands manually to resolve the issue:"
+                        log_error "1. sudo launchctl bootout system $plist"
+                        log_error "2. sudo launchctl unload $plist"
+                        log_error "If the issue persists, check the system logs for more details."
+                    fi
                 else
                     log_warning "Root privileges required to manage $plist. Skipping..."
                 fi
@@ -322,11 +427,11 @@ manage_startup_items() {
     done
 }
 
-# Function to display system information
+# Function to display system information with more details
 display_system_info() {
     log_section "System Information"
     log_info "Displaying system information..."
-    system_profiler SPSoftwareDataType SPHardwareDataType
+    system_profiler SPSoftwareDataType SPHardwareDataType SPNetworkDataType
     log_success "System information displayed successfully."
 }
 
