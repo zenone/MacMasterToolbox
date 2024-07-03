@@ -159,7 +159,6 @@ check_and_repair_disks() {
     done
 }
 
-# Function to handle npm errors
 handle_npm_errors() {
     log_section "Handling npm Errors"
     local error="$1"
@@ -169,8 +168,10 @@ handle_npm_errors() {
         sudo chown -R $(whoami) ~/.npm
     elif echo "$error" | grep -q "E404"; then
         log_warning "Removing invalid npm package..."
-        local invalid_package=$(echo "$error" | grep -o "404  .*  - Not found" | awk '{print $2}')
+        local invalid_package=$(echo "$error" | grep -o "'@[^/]\+/\.[^@]\+@[^']\+'" | tr -d "'")
         npm uninstall -g "$invalid_package" || true
+        sed -i.bak "/\"$invalid_package\": \".*\"/d" package.json
+        log_success "Removed invalid npm package: $invalid_package"
     elif echo "$error" | grep -q "EUSAGE"; then
         log_warning "Fixing npm usage error..."
         npm uninstall -g $(echo "$error" | grep -o "Usage: .*" | awk '{print $2}') || true
@@ -187,22 +188,7 @@ handle_npm_errors() {
 # Function to handle deprecated npm packages
 handle_npm_deprecated_warnings() {
     log_section "Handling npm Deprecated Warnings"
-    local warnings=(
-        "inflight"
-        "phin"
-        "string-similarity"
-        "har-validator"
-        "rimraf"
-        "abab"
-        "glob"
-        "w3c-hr-time"
-        "domexception"
-        "uuid"
-        "@applitools/eyes-sdk-core"
-        "request"
-        "sinon"
-    )
-    for package in "${warnings[@]}"; do
+    npm list -g --depth=0 | grep 'deprecated' | awk '{print $2}' | awk -F '@' '{print $1}' | while read -r package; do
         log_info "Removing deprecated npm package: $package"
         npm uninstall -g "$package" || log_warning "Failed to remove $package. Manual intervention required."
     done
